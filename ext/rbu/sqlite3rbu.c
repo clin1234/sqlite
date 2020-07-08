@@ -182,6 +182,7 @@
 typedef struct RbuFrame RbuFrame;
 typedef struct RbuObjIter RbuObjIter;
 typedef struct RbuState RbuState;
+typedef struct RbuSpan RbuSpan;
 typedef struct rbu_vfs rbu_vfs;
 typedef struct rbu_file rbu_file;
 typedef struct RbuUpdateStmt RbuUpdateStmt;
@@ -224,6 +225,11 @@ struct RbuUpdateStmt {
   char *zMask;                    /* Copy of update mask used with pUpdate */
   sqlite3_stmt *pUpdate;          /* Last update statement (or NULL) */
   RbuUpdateStmt *pNext;
+};
+
+struct RbuSpan {
+  const char *zSpan;
+  int nSpan;
 };
 
 /*
@@ -275,6 +281,9 @@ struct RbuObjIter {
   sqlite3_stmt *pInsert;          /* Statement for INSERT operations */
   sqlite3_stmt *pDelete;          /* Statement for DELETE ops */
   sqlite3_stmt *pTmpInsert;       /* Insert into rbu_tmp_$zDataTbl */
+  int nIdxCol;
+  RbuSpan *aIdxCol;
+  char *zIdxSql;
 
   /* Last UPDATE used (for PK b-tree updates only), or NULL. */
   RbuUpdateStmt *pRbuUpdate;
@@ -809,6 +818,8 @@ static void rbuObjIterClearStatements(RbuObjIter *pIter){
     sqlite3_free(pUp);
     pUp = pTmp;
   }
+  sqlite3_free(pIter->aIdxCol);
+  sqlite3_free(pIter->zIdxSql);
   
   pIter->pSelect = 0;
   pIter->pInsert = 0;
@@ -816,6 +827,9 @@ static void rbuObjIterClearStatements(RbuObjIter *pIter){
   pIter->pRbuUpdate = 0;
   pIter->pTmpInsert = 0;
   pIter->nCol = 0;
+  pIter->nIdxCol = 0;
+  pIter->aIdxCol = 0;
+  pIter->zIdxSql = 0;
 }
 
 /*
@@ -930,8 +944,8 @@ static void rbuTargetNameFunc(
   zIn = (const char*)sqlite3_value_text(argv[0]);
   if( zIn ){
     if( rbuIsVacuum(p) ){
-      assert( argc==2 );
-      if( 0==sqlite3_value_int(argv[1]) ){
+      assert( argc==2 || argc==1 );
+      if( argc==1 || 0==sqlite3_value_int(argv[1]) ){
         sqlite3_result_text(pCtx, zIn, -1, SQLITE_STATIC);
       }
     }else{
@@ -961,7 +975,7 @@ static int rbuObjIterFirst(sqlite3rbu *p, RbuObjIter *pIter){
   rc = prepareFreeAndCollectError(p->dbRbu, &pIter->pTblIter, &p->zErrmsg, 
     sqlite3_mprintf(
       "SELECT rbu_target_name(name, type='view') AS target, name "
-      "FROM sqlite_master "
+      "FROM sqlite_schema "
       "WHERE type IN ('table', 'view') AND target IS NOT NULL "
       " %s "
       "ORDER BY name"
@@ -970,7 +984,7 @@ static int rbuObjIterFirst(sqlite3rbu *p, RbuObjIter *pIter){
   if( rc==SQLITE_OK ){
     rc = prepareAndCollectError(p->dbMain, &pIter->pIdxIter, &p->zErrmsg,
         "SELECT name, rootpage, sql IS NULL OR substr(8, 6)=='UNIQUE' "
-        "  FROM main.sqlite_master "
+        "  FROM main.sqlite_schema "
         "  WHERE type='index' AND tbl_name = ?"
     );
   }
@@ -1089,14 +1103,15 @@ static void rbuAllocateIterArrays(sqlite3rbu *p, RbuObjIter *pIter, int nCol){
 static char *rbuStrndup(const char *zStr, int *pRc){
   char *zRet = 0;
 
-  assert( *pRc==SQLITE_OK );
-  if( zStr ){
-    size_t nCopy = strlen(zStr) + 1;
-    zRet = (char*)sqlite3_malloc64(nCopy);
-    if( zRet ){
-      memcpy(zRet, zStr, nCopy);
-    }else{
-      *pRc = SQLITE_NOMEM;
+  if( *pRc==SQLITE_OK ){
+    if( zStr ){
+      size_t nCopy = strlen(zStr) + 1;
+      zRet = (char*)sqlite3_malloc64(nCopy);
+      if( zRet ){
+        memcpy(zRet, zStr, nCopy);
+      }else{
+        *pRc = SQLITE_NOMEM;
+      }
     }
   }
 
@@ -1141,12 +1156,12 @@ static void rbuFinalize(sqlite3rbu *p, sqlite3_stmt *pStmt){
 **
 ** ALGORITHM:
 **
-**   if( no entry exists in sqlite_master ){
+**   if( no entry exists in sqlite_schema ){
 **     return RBU_PK_NOTABLE
 **   }else if( sql for the entry starts with "CREATE VIRTUAL" ){
 **     return RBU_PK_VTAB
 **   }else if( "PRAGMA index_list()" for the table contains a "pk" index ){
-**     if( the index that is the pk exists in sqlite_master ){
+**     if( the index that is the pk exists in sqlite_schema ){
 **       *piPK = rootpage of that index.
 **       return RBU_PK_EXTERNAL
 **     }else{
@@ -1166,9 +1181,9 @@ static void rbuTableType(
   int *piPk
 ){
   /*
-  ** 0) SELECT count(*) FROM sqlite_master where name=%Q AND IsVirtual(%Q)
+  ** 0) SELECT count(*) FROM sqlite_schema where name=%Q AND IsVirtual(%Q)
   ** 1) PRAGMA index_list = ?
-  ** 2) SELECT count(*) FROM sqlite_master where name=%Q 
+  ** 2) SELECT count(*) FROM sqlite_schema where name=%Q 
   ** 3) PRAGMA table_info = ?
   */
   sqlite3_stmt *aStmt[4] = {0, 0, 0, 0};
@@ -1180,7 +1195,7 @@ static void rbuTableType(
   p->rc = prepareFreeAndCollectError(p->dbMain, &aStmt[0], &p->zErrmsg, 
     sqlite3_mprintf(
           "SELECT (sql LIKE 'create virtual%%'), rootpage"
-          "  FROM sqlite_master"
+          "  FROM sqlite_schema"
           " WHERE name=%Q", zTab
   ));
   if( p->rc!=SQLITE_OK || sqlite3_step(aStmt[0])!=SQLITE_ROW ){
@@ -1203,7 +1218,7 @@ static void rbuTableType(
     if( zOrig && zIdx && zOrig[0]=='p' ){
       p->rc = prepareFreeAndCollectError(p->dbMain, &aStmt[2], &p->zErrmsg, 
           sqlite3_mprintf(
-            "SELECT rootpage FROM sqlite_master WHERE name = %Q", zIdx
+            "SELECT rootpage FROM sqlite_schema WHERE name = %Q", zIdx
       ));
       if( p->rc==SQLITE_OK ){
         if( sqlite3_step(aStmt[2])==SQLITE_ROW ){
@@ -1268,6 +1283,9 @@ static void rbuObjIterCacheIndexedCols(sqlite3rbu *p, RbuObjIter *pIter){
     while( p->rc==SQLITE_OK && SQLITE_ROW==sqlite3_step(pXInfo) ){
       int iCid = sqlite3_column_int(pXInfo, 1);
       if( iCid>=0 ) pIter->abIndexed[iCid] = 1;
+      if( iCid==-2 ){
+        memset(pIter->abIndexed, 0x01, sizeof(u8)*pIter->nTblCol);
+      }
     }
     rbuFinalize(p, pXInfo);
     bIndex = 1;
@@ -1679,29 +1697,37 @@ static char *rbuObjIterGetIndexCols(
     int iCid = sqlite3_column_int(pXInfo, 1);
     int bDesc = sqlite3_column_int(pXInfo, 3);
     const char *zCollate = (const char*)sqlite3_column_text(pXInfo, 4);
-    const char *zCol;
+    const char *zCol = 0;
     const char *zType;
 
-    if( iCid<0 ){
-      /* An integer primary key. If the table has an explicit IPK, use
-      ** its name. Otherwise, use "rbu_rowid".  */
-      if( pIter->eType==RBU_PK_IPK ){
-        int i;
-        for(i=0; pIter->abTblPk[i]==0; i++);
-        assert( i<pIter->nTblCol );
-        zCol = pIter->azTblCol[i];
-      }else if( rbuIsVacuum(p) ){
-        zCol = "_rowid_";
+    if( iCid==-2 ){
+      int iSeq = sqlite3_column_int(pXInfo, 0);
+      zRet = sqlite3_mprintf("%z%s(%.*s) COLLATE %Q", zRet, zCom,
+          pIter->aIdxCol[iSeq].nSpan, pIter->aIdxCol[iSeq].zSpan, zCollate
+      );
+      zType = "";
+    }else {
+      if( iCid<0 ){
+        /* An integer primary key. If the table has an explicit IPK, use
+        ** its name. Otherwise, use "rbu_rowid".  */
+        if( pIter->eType==RBU_PK_IPK ){
+          int i;
+          for(i=0; pIter->abTblPk[i]==0; i++);
+          assert( i<pIter->nTblCol );
+          zCol = pIter->azTblCol[i];
+        }else if( rbuIsVacuum(p) ){
+          zCol = "_rowid_";
+        }else{
+          zCol = "rbu_rowid";
+        }
+        zType = "INTEGER";
       }else{
-        zCol = "rbu_rowid";
+        zCol = pIter->azTblCol[iCid];
+        zType = pIter->azTblType[iCid];
       }
-      zType = "INTEGER";
-    }else{
-      zCol = pIter->azTblCol[iCid];
-      zType = pIter->azTblType[iCid];
+      zRet = sqlite3_mprintf("%z%s\"%w\" COLLATE %Q", zRet, zCom,zCol,zCollate);
     }
 
-    zRet = sqlite3_mprintf("%z%s\"%w\" COLLATE %Q", zRet, zCom, zCol, zCollate);
     if( pIter->bUnique==0 || sqlite3_column_int(pXInfo, 5) ){
       const char *zOrder = (bDesc ? " DESC" : "");
       zImpPK = sqlite3_mprintf("%z%s\"rbu_imp_%d%w\"%s", 
@@ -2012,7 +2038,7 @@ static void rbuCreateImposterTable2(sqlite3rbu *p, RbuObjIter *pIter){
     ** This is needed for the argument to "PRAGMA index_xinfo". Set
     ** zIdx to point to a nul-terminated string containing this name. */
     p->rc = prepareAndCollectError(p->dbMain, &pQuery, &p->zErrmsg, 
-        "SELECT name FROM sqlite_master WHERE rootpage = ?"
+        "SELECT name FROM sqlite_schema WHERE rootpage = ?"
     );
     if( p->rc==SQLITE_OK ){
       sqlite3_bind_int(pQuery, 1, tnum);
@@ -2181,30 +2207,61 @@ static char *rbuObjIterGetIndexWhere(sqlite3rbu *p, RbuObjIter *pIter){
   int rc = p->rc;
   char *zRet = 0;
 
+  assert( pIter->zIdxSql==0 && pIter->nIdxCol==0 && pIter->aIdxCol==0 );
+
   if( rc==SQLITE_OK ){
     rc = prepareAndCollectError(p->dbMain, &pStmt, &p->zErrmsg,
-        "SELECT trim(sql) FROM sqlite_master WHERE type='index' AND name=?"
+        "SELECT trim(sql) FROM sqlite_schema WHERE type='index' AND name=?"
     );
   }
   if( rc==SQLITE_OK ){
     int rc2;
     rc = sqlite3_bind_text(pStmt, 1, pIter->zIdx, -1, SQLITE_STATIC);
     if( rc==SQLITE_OK && SQLITE_ROW==sqlite3_step(pStmt) ){
-      const char *zSql = (const char*)sqlite3_column_text(pStmt, 0);
+      char *zSql = (char*)sqlite3_column_text(pStmt, 0);
+      if( zSql ){
+        pIter->zIdxSql = zSql = rbuStrndup(zSql, &rc);
+      }
       if( zSql ){
         int nParen = 0;           /* Number of open parenthesis */
         int i;
+        int iIdxCol = 0;
+        int nIdxAlloc = 0;
         for(i=0; zSql[i]; i++){
           char c = zSql[i];
+
+          /* If necessary, grow the pIter->aIdxCol[] array */
+          if( iIdxCol==nIdxAlloc ){
+            RbuSpan *aIdxCol = (RbuSpan*)sqlite3_realloc(
+                pIter->aIdxCol, (nIdxAlloc+16)*sizeof(RbuSpan)
+            );
+            if( aIdxCol==0 ){
+              rc = SQLITE_NOMEM;
+              break;
+            }
+            pIter->aIdxCol = aIdxCol;
+            nIdxAlloc += 16;
+          }
+
           if( c=='(' ){
+            if( nParen==0 ){
+              assert( iIdxCol==0 );
+              pIter->aIdxCol[0].zSpan = &zSql[i+1];
+            }
             nParen++;
           }
           else if( c==')' ){
             nParen--;
             if( nParen==0 ){
+              int nSpan = &zSql[i] - pIter->aIdxCol[iIdxCol].zSpan;
+              pIter->aIdxCol[iIdxCol++].nSpan = nSpan;
               i++;
               break;
             }
+          }else if( c==',' && nParen==1 ){
+            int nSpan = &zSql[i] - pIter->aIdxCol[iIdxCol].zSpan;
+            pIter->aIdxCol[iIdxCol++].nSpan = nSpan;
+            pIter->aIdxCol[iIdxCol].zSpan = &zSql[i+1];
           }else if( c=='"' || c=='\'' || c=='`' ){
             for(i++; 1; i++){
               if( zSql[i]==c ){
@@ -2216,11 +2273,19 @@ static char *rbuObjIterGetIndexWhere(sqlite3rbu *p, RbuObjIter *pIter){
             for(i++; 1; i++){
               if( zSql[i]==']' ) break;
             }
+          }else if( c=='-' && zSql[i+1]=='-' ){
+            for(i=i+2; zSql[i] && zSql[i]!='\n'; i++);
+            if( zSql[i]=='\0' ) break;
+          }else if( c=='/' && zSql[i+1]=='*' ){
+            for(i=i+2; zSql[i] && (zSql[i]!='*' || zSql[i+1]!='/'); i++);
+            if( zSql[i]=='\0' ) break;
+            i++;
           }
         }
         if( zSql[i] ){
           zRet = rbuStrndup(&zSql[i], &rc);
         }
+        pIter->nIdxCol = iIdxCol;
       }
     }
 
@@ -2265,11 +2330,11 @@ static int rbuObjIterPrepareAll(
       int nBind = 0;
 
       assert( pIter->eType!=RBU_PK_VTAB );
+      zPart = rbuObjIterGetIndexWhere(p, pIter);
       zCollist = rbuObjIterGetIndexCols(
           p, pIter, &zImposterCols, &zImposterPK, &zWhere, &nBind
       );
       zBind = rbuObjIterGetBindlist(p, nBind);
-      zPart = rbuObjIterGetIndexWhere(p, pIter);
 
       /* Create the imposter table used to write to this index. */
       sqlite3_test_control(SQLITE_TESTCTRL_IMPOSTER, p->dbMain, "main", 0, 1);
@@ -2728,7 +2793,7 @@ static void rbuOpenDatabase(sqlite3rbu *p, int *pbRetry){
       int bOk = 0;
       sqlite3_stmt *pCnt = 0;
       p->rc = prepareAndCollectError(p->dbRbu, &pCnt, &p->zErrmsg,
-          "SELECT count(*) FROM stat.sqlite_master"
+          "SELECT count(*) FROM stat.sqlite_schema"
       );
       if( p->rc==SQLITE_OK 
        && sqlite3_step(pCnt)==SQLITE_ROW
@@ -2832,7 +2897,7 @@ static void rbuOpenDatabase(sqlite3rbu *p, int *pbRetry){
   if( p->rc==SQLITE_OK ){
     p->rc = sqlite3_file_control(p->dbMain, "main", SQLITE_FCNTL_RBU, (void*)p);
   }
-  rbuMPrintfExec(p, p->dbMain, "SELECT * FROM sqlite_master");
+  rbuMPrintfExec(p, p->dbMain, "SELECT * FROM sqlite_schema");
 
   /* Mark the database file just opened as an RBU target database. If 
   ** this call returns SQLITE_NOTFOUND, then the RBU vfs is not in use.
@@ -2925,7 +2990,7 @@ static void rbuSetupCheckpoint(sqlite3rbu *p, RbuState *pState){
   if( pState==0 ){
     p->eStage = 0;
     if( p->rc==SQLITE_OK ){
-      p->rc = sqlite3_exec(p->dbMain, "SELECT * FROM sqlite_master", 0, 0, 0);
+      p->rc = sqlite3_exec(p->dbMain, "SELECT * FROM sqlite_schema", 0, 0, 0);
     }
   }
 
@@ -3516,7 +3581,7 @@ static void rbuCreateTargetSchema(sqlite3rbu *p){
   p->rc = sqlite3_exec(p->dbMain, "PRAGMA writable_schema=1", 0,0, &p->zErrmsg);
   if( p->rc==SQLITE_OK ){
     p->rc = prepareAndCollectError(p->dbRbu, &pSql, &p->zErrmsg, 
-      "SELECT sql FROM sqlite_master WHERE sql!='' AND rootpage!=0"
+      "SELECT sql FROM sqlite_schema WHERE sql!='' AND rootpage!=0"
       " AND name!='sqlite_sequence' "
       " ORDER BY type DESC"
     );
@@ -3531,13 +3596,13 @@ static void rbuCreateTargetSchema(sqlite3rbu *p){
 
   if( p->rc==SQLITE_OK ){
     p->rc = prepareAndCollectError(p->dbRbu, &pSql, &p->zErrmsg, 
-        "SELECT * FROM sqlite_master WHERE rootpage=0 OR rootpage IS NULL" 
+        "SELECT * FROM sqlite_schema WHERE rootpage=0 OR rootpage IS NULL" 
     );
   }
 
   if( p->rc==SQLITE_OK ){
     p->rc = prepareAndCollectError(p->dbMain, &pInsert, &p->zErrmsg, 
-        "INSERT INTO sqlite_master VALUES(?,?,?,?,?)"
+        "INSERT INTO sqlite_schema VALUES(?,?,?,?,?)"
     );
   }
 
@@ -3795,11 +3860,12 @@ static void rbuIndexCntFunc(
   sqlite3_stmt *pStmt = 0;
   char *zErrmsg = 0;
   int rc;
+  sqlite3 *db = (rbuIsVacuum(p) ? p->dbRbu : p->dbMain);
 
   assert( nVal==1 );
   
-  rc = prepareFreeAndCollectError(p->dbMain, &pStmt, &zErrmsg, 
-      sqlite3_mprintf("SELECT count(*) FROM sqlite_master "
+  rc = prepareFreeAndCollectError(db, &pStmt, &zErrmsg, 
+      sqlite3_mprintf("SELECT count(*) FROM sqlite_schema "
         "WHERE type='index' AND tbl_name = %Q", sqlite3_value_text(apVal[0]))
   );
   if( rc!=SQLITE_OK ){
@@ -3813,7 +3879,7 @@ static void rbuIndexCntFunc(
     if( rc==SQLITE_OK ){
       sqlite3_result_int(pCtx, nIndex);
     }else{
-      sqlite3_result_error(pCtx, sqlite3_errmsg(p->dbMain), -1);
+      sqlite3_result_error(pCtx, sqlite3_errmsg(db), -1);
     }
   }
 
@@ -3850,7 +3916,7 @@ static void rbuInitPhaseOneSteps(sqlite3rbu *p){
     ** occurs, nPhaseOneStep will be left set to -1. */
     if( p->rc==SQLITE_OK ){
       p->rc = prepareAndCollectError(p->dbRbu, &pStmt, &p->zErrmsg,
-          "SELECT 1 FROM sqlite_master WHERE tbl_name = 'rbu_count'"
+          "SELECT 1 FROM sqlite_schema WHERE tbl_name = 'rbu_count'"
       );
     }
     if( p->rc==SQLITE_OK ){
@@ -4870,33 +4936,6 @@ static int rbuVfsShmUnmap(sqlite3_file *pFile, int delFlag){
   return rc;
 }
 
-/* 
-** A main database named zName has just been opened. The following 
-** function returns a pointer to a buffer owned by SQLite that contains
-** the name of the *-wal file this db connection will use. SQLite
-** happens to pass a pointer to this buffer when using xAccess()
-** or xOpen() to operate on the *-wal file.  
-*/
-static const char *rbuMainToWal(const char *zName, int flags){
-  int n = (int)strlen(zName);
-  const char *z = &zName[n];
-  if( flags & SQLITE_OPEN_URI ){
-    int odd = 0;
-    while( 1 ){
-      if( z[0]==0 ){
-        odd = 1 - odd;
-        if( odd && z[1]==0 ) break;
-      }
-      z++;
-    }
-    z += 2;
-  }else{
-    while( *z==0 ) z++;
-  }
-  z += (n + 8 + 1);
-  return z;
-}
-
 /*
 ** Open an rbu file handle.
 */
@@ -4945,7 +4984,7 @@ static int rbuVfsOpen(
       ** the name of the *-wal file this db connection will use. SQLite
       ** happens to pass a pointer to this buffer when using xAccess()
       ** or xOpen() to operate on the *-wal file.  */
-      pFd->zWal = rbuMainToWal(zName, flags);
+      pFd->zWal = sqlite3_filename_wal(zName);
     }
     else if( flags & SQLITE_OPEN_WAL ){
       rbu_file *pDb = rbuFindMaindb(pRbuVfs, zName, 0);
@@ -4960,7 +4999,7 @@ static int rbuVfsOpen(
           char *zCopy;
           if( rbuIsVacuum(pDb->pRbu) ){
             zBase = sqlite3_db_filename(pDb->pRbu->dbRbu, "main");
-            zBase = rbuMainToWal(zBase, SQLITE_OPEN_URI);
+            zBase = sqlite3_filename_wal(zBase);
           }
           nCopy = strlen(zBase);
           zCopy = sqlite3_malloc64(nCopy+2);

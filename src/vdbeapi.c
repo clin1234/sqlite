@@ -655,6 +655,13 @@ static int sqlite3Step(Vdbe *p){
   if( p->pc<0 && p->expired ){
     p->rc = SQLITE_SCHEMA;
     rc = SQLITE_ERROR;
+    if( (p->prepFlags & SQLITE_PREPARE_SAVESQL)!=0 ){
+      /* If this statement was prepared using saved SQL and an 
+      ** error has occurred, then return the error code in p->rc to the
+      ** caller. Set the error code in the database handle to the same value.
+      */ 
+      rc = sqlite3VdbeTransferError(p);
+    }
     goto end_of_step;
   }
   if( p->pc<0 ){
@@ -663,7 +670,7 @@ static int sqlite3Step(Vdbe *p){
     ** from interrupting a statement that has not yet started.
     */
     if( db->nVdbeActive==0 ){
-      db->u1.isInterrupted = 0;
+      AtomicStore(&db->u1.isInterrupted, 0);
     }
 
     assert( db->nVdbeWrite>0 || db->autoCommit==0 
@@ -710,35 +717,27 @@ static int sqlite3Step(Vdbe *p){
       if( p->rc!=SQLITE_OK ){
         rc = SQLITE_ERROR;
       }
+    }else if( rc!=SQLITE_DONE && (p->prepFlags & SQLITE_PREPARE_SAVESQL)!=0 ){
+      /* If this statement was prepared using saved SQL and an 
+      ** error has occurred, then return the error code in p->rc to the
+      ** caller. Set the error code in the database handle to the same value.
+      */ 
+      rc = sqlite3VdbeTransferError(p);
     }
   }
 
   db->errCode = rc;
   if( SQLITE_NOMEM==sqlite3ApiExit(p->db, p->rc) ){
     p->rc = SQLITE_NOMEM_BKPT;
+    if( (p->prepFlags & SQLITE_PREPARE_SAVESQL)!=0 ) rc = p->rc;
   }
 end_of_step:
-  /* At this point local variable rc holds the value that should be 
-  ** returned if this statement was compiled using the legacy 
-  ** sqlite3_prepare() interface. According to the docs, this can only
-  ** be one of the values in the first assert() below. Variable p->rc 
-  ** contains the value that would be returned if sqlite3_finalize() 
-  ** were called on statement p.
-  */
-  assert( rc==SQLITE_ROW  || rc==SQLITE_DONE   || rc==SQLITE_ERROR 
+  /* There are only a limited number of result codes allowed from the
+  ** statements prepared using the legacy sqlite3_prepare() interface */
+  assert( (p->prepFlags & SQLITE_PREPARE_SAVESQL)!=0
+       || rc==SQLITE_ROW  || rc==SQLITE_DONE   || rc==SQLITE_ERROR 
        || (rc&0xff)==SQLITE_BUSY || rc==SQLITE_MISUSE
   );
-  assert( (p->rc!=SQLITE_ROW && p->rc!=SQLITE_DONE) || p->rc==p->rcApp );
-  if( rc!=SQLITE_ROW 
-   && rc!=SQLITE_DONE
-   && (p->prepFlags & SQLITE_PREPARE_SAVESQL)!=0
-  ){
-    /* If this statement was prepared using saved SQL and an 
-    ** error has occurred, then return the error code in p->rc to the
-    ** caller. Set the error code in the database handle to the same value.
-    */ 
-    rc = sqlite3VdbeTransferError(p);
-  }
   return (rc&db->errMask);
 }
 
@@ -844,7 +843,7 @@ int sqlite3_vtab_nochange(sqlite3_context *p){
 */
 sqlite3_int64 sqlite3StmtCurrentTime(sqlite3_context *p){
   int rc;
-#ifndef SQLITE_ENABLE_STAT3_OR_STAT4
+#ifndef SQLITE_ENABLE_STAT4
   sqlite3_int64 *piTime = &p->pVdbe->iCurrentTime;
   assert( p->pVdbe!=0 );
 #else
@@ -909,7 +908,7 @@ void *sqlite3_get_auxdata(sqlite3_context *pCtx, int iArg){
   AuxData *pAuxData;
 
   assert( sqlite3_mutex_held(pCtx->pOut->db->mutex) );
-#if SQLITE_ENABLE_STAT3_OR_STAT4
+#if SQLITE_ENABLE_STAT4
   if( pCtx->pVdbe==0 ) return 0;
 #else
   assert( pCtx->pVdbe!=0 );
@@ -943,7 +942,7 @@ void sqlite3_set_auxdata(
   Vdbe *pVdbe = pCtx->pVdbe;
 
   assert( sqlite3_mutex_held(pCtx->pOut->db->mutex) );
-#ifdef SQLITE_ENABLE_STAT3_OR_STAT4
+#ifdef SQLITE_ENABLE_STAT4
   if( pVdbe==0 ) goto failed;
 #else
   assert( pVdbe!=0 );
@@ -1355,7 +1354,7 @@ static int vdbeUnbind(Vdbe *p, int i){
   /* If the bit corresponding to this variable in Vdbe.expmask is set, then 
   ** binding a new value to this variable invalidates the current query plan.
   **
-  ** IMPLEMENTATION-OF: R-48440-37595 If the specific value bound to host
+  ** IMPLEMENTATION-OF: R-57496-20354 If the specific value bound to a host
   ** parameter in the WHERE clause might influence the choice of query plan
   ** for a statement, then the statement will be automatically recompiled,
   ** as if there had been a schema change, on the first sqlite3_step() call
@@ -1831,7 +1830,7 @@ int sqlite3_preupdate_old(sqlite3 *db, int iIdx, sqlite3_value **ppValue){
     goto preupdate_old_out;
   }
   if( p->pPk ){
-    iIdx = sqlite3ColumnOfIndex(p->pPk, iIdx);
+    iIdx = sqlite3TableColumnToIndex(p->pPk, iIdx);
   }
   if( iIdx>=p->pCsr->nField || iIdx<0 ){
     rc = SQLITE_RANGE;
@@ -1921,7 +1920,7 @@ int sqlite3_preupdate_new(sqlite3 *db, int iIdx, sqlite3_value **ppValue){
     goto preupdate_new_out;
   }
   if( p->pPk && p->op!=SQLITE_UPDATE ){
-    iIdx = sqlite3ColumnOfIndex(p->pPk, iIdx);
+    iIdx = sqlite3TableColumnToIndex(p->pPk, iIdx);
   }
   if( iIdx>=p->pCsr->nField || iIdx<0 ){
     rc = SQLITE_RANGE;

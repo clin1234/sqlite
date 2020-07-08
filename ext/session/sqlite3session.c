@@ -1837,7 +1837,7 @@ static int sessionBufferGrow(SessionBuffer *p, size_t nByte, int *pRc){
     i64 nNew = p->nAlloc ? p->nAlloc : 128;
     do {
       nNew = nNew*2;
-    }while( (nNew-p->nBuf)<nByte );
+    }while( (size_t)(nNew-p->nBuf)<nByte );
 
     aNew = (u8 *)sqlite3_realloc64(p->aBuf, nNew);
     if( 0==aNew ){
@@ -3479,6 +3479,7 @@ struct SessionApplyCtx {
   u8 *abPK;                       /* Boolean array - true if column is in PK */
   int bStat1;                     /* True if table is sqlite_stat1 */
   int bDeferConstraints;          /* True to defer constraints */
+  int bInvertConstraints;         /* Invert when iterating constraints buffer */
   SessionBuffer constraints;      /* Deferred constraints are stored here */
   SessionBuffer rebase;           /* Rebase information (if any) here */
   u8 bRebaseStarted;              /* If table header is already in rebase */
@@ -3513,7 +3514,7 @@ static int sessionDeleteRow(
   SessionBuffer buf = {0, 0, 0};
   int nPk = 0;
 
-  sessionAppendStr(&buf, "DELETE FROM ", &rc);
+  sessionAppendStr(&buf, "DELETE FROM main.", &rc);
   sessionAppendIdent(&buf, zTab, &rc);
   sessionAppendStr(&buf, " WHERE ", &rc);
 
@@ -3596,7 +3597,7 @@ static int sessionUpdateRow(
   SessionBuffer buf = {0, 0, 0};
 
   /* Append "UPDATE tbl SET " */
-  sessionAppendStr(&buf, "UPDATE ", &rc);
+  sessionAppendStr(&buf, "UPDATE main.", &rc);
   sessionAppendIdent(&buf, zTab, &rc);
   sessionAppendStr(&buf, " SET ", &rc);
 
@@ -4251,7 +4252,9 @@ static int sessionRetryConstraints(
     SessionBuffer cons = pApply->constraints;
     memset(&pApply->constraints, 0, sizeof(SessionBuffer));
 
-    rc = sessionChangesetStart(&pIter2, 0, 0, cons.nBuf, cons.aBuf, 0);
+    rc = sessionChangesetStart(
+        &pIter2, 0, 0, cons.nBuf, cons.aBuf, pApply->bInvertConstraints
+    );
     if( rc==SQLITE_OK ){
       size_t nByte = 2*pApply->nCol*sizeof(sqlite3_value*);
       int rc2;
@@ -4318,6 +4321,7 @@ static int sessionChangesetApply(
   pIter->in.bNoDiscard = 1;
   memset(&sApply, 0, sizeof(sApply));
   sApply.bRebase = (ppRebase && pnRebase);
+  sApply.bInvertConstraints = !!(flags & SQLITE_CHANGESETAPPLY_INVERT);
   sqlite3_mutex_enter(sqlite3_db_mutex(db));
   if( (flags & SQLITE_CHANGESETAPPLY_NOSAVEPOINT)==0 ){
     rc = sqlite3_exec(db, "SAVEPOINT changeset_apply", 0, 0, 0);

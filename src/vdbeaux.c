@@ -475,6 +475,7 @@ void sqlite3VdbeAddParseSchemaOp(Vdbe *p, int iDb, char *zWhere){
   int j;
   sqlite3VdbeAddOp4(p, OP_ParseSchema, iDb, 0, 0, zWhere, P4_DYNAMIC);
   for(j=0; j<p->db->nDb; j++) sqlite3VdbeUsesBtree(p, j);
+  sqlite3MayAbort(p->pParse);
 }
 
 /*
@@ -703,7 +704,7 @@ int sqlite3VdbeAssertMayAbort(Vdbe *v, int mayAbort){
     if( opcode==OP_Destroy || opcode==OP_VUpdate || opcode==OP_VRename 
      || opcode==OP_VDestroy
      || opcode==OP_VCreate
-     || (opcode==OP_ParseSchema && pOp->p4.z==0)
+     || opcode==OP_ParseSchema
      || ((opcode==OP_Halt || opcode==OP_HaltIfNull) 
       && ((pOp->p1)!=SQLITE_OK && pOp->p2==OE_Abort))
     ){
@@ -808,7 +809,7 @@ static void resolveP2Values(Vdbe *p, int *pMaxFuncArgs){
       switch( pOp->opcode ){
         case OP_Transaction: {
           if( pOp->p2!=0 ) p->readOnly = 0;
-          /* fall thru */
+          /* no break */ deliberate_fall_through
         }
         case OP_AutoCommit:
         case OP_Savepoint: {
@@ -855,6 +856,7 @@ static void resolveP2Values(Vdbe *p, int *pMaxFuncArgs){
           n = pOp[-1].p1;
           if( n>nMaxArgs ) nMaxArgs = n;
           /* Fall through into the default case */
+          /* no break */ deliberate_fall_through
         }
 #endif
         default: {
@@ -1520,7 +1522,7 @@ char *sqlite3VdbeDisplayComment(
               sqlite3_str_appendf(&x, "%d", v1);
             }else if( pCtx->argc>1 ){
               sqlite3_str_appendf(&x, "%d..%d", v1, v1+pCtx->argc-1);
-            }else{
+            }else if( x.accError==0 ){
               assert( x.nChar>2 );
               x.nChar -= 2;
               ii++;
@@ -1712,12 +1714,12 @@ char *sqlite3VdbeDisplayP4(sqlite3 *db, Op *pOp){
     }
 #endif
     case P4_INTARRAY: {
-      int i;
-      int *ai = pOp->p4.ai;
-      int n = ai[0];   /* The first element of an INTARRAY is always the
+      u32 i;
+      u32 *ai = pOp->p4.ai;
+      u32 n = ai[0];   /* The first element of an INTARRAY is always the
                        ** count of the number of elements to follow */
       for(i=1; i<=n; i++){
-        sqlite3_str_appendf(&x, "%c%d", (i==1 ? '[' : ','), ai[i]);
+        sqlite3_str_appendf(&x, "%c%u", (i==1 ? '[' : ','), ai[i]);
       }
       sqlite3_str_append(&x, "]", 1);
       break;
@@ -2662,7 +2664,7 @@ static int vdbeCommit(sqlite3 *db, Vdbe *p){
   */ 
   for(i=0; rc==SQLITE_OK && i<db->nDb; i++){ 
     Btree *pBt = db->aDb[i].pBt;
-    if( sqlite3BtreeIsInTrans(pBt) ){
+    if( sqlite3BtreeTxnState(pBt)==SQLITE_TXN_WRITE ){
       /* Whether or not a database might need a super-journal depends upon
       ** its journal mode (among other things).  This matrix determines which
       ** journal modes use a super-journal and which do not */
@@ -2797,7 +2799,7 @@ static int vdbeCommit(sqlite3 *db, Vdbe *p){
     */
     for(i=0; i<db->nDb; i++){
       Btree *pBt = db->aDb[i].pBt;
-      if( sqlite3BtreeIsInTrans(pBt) ){
+      if( sqlite3BtreeTxnState(pBt)==SQLITE_TXN_WRITE ){
         char const *zFile = sqlite3BtreeGetJournalname(pBt);
         if( zFile==0 ){
           continue;  /* Ignore TEMP and :memory: databases */
@@ -3561,11 +3563,11 @@ int sqlite3VdbeCursorRestore(VdbeCursor *p){
 ** If the cursor is already pointing to the correct row and that row has
 ** not been deleted out from under the cursor, then this routine is a no-op.
 */
-int sqlite3VdbeCursorMoveto(VdbeCursor **pp, int *piCol){
+int sqlite3VdbeCursorMoveto(VdbeCursor **pp, u32 *piCol){
   VdbeCursor *p = *pp;
   assert( p->eCurType==CURTYPE_BTREE || p->eCurType==CURTYPE_PSEUDO );
   if( p->deferredMoveto ){
-    int iMap;
+    u32 iMap;
     if( p->aAltMap && (iMap = p->aAltMap[1+*piCol])>0 && !p->nullRow ){
       *pp = p->pAltCursor;
       *piCol = iMap - 1;

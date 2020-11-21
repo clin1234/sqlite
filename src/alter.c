@@ -1160,7 +1160,7 @@ static int renameEditSql(
 ** successful. Otherwise, return an SQLite error code and leave an error
 ** message in the Parse object.
 */
-static int renameResolveTrigger(Parse *pParse, const char *zDb){
+static int renameResolveTrigger(Parse *pParse){
   sqlite3 *db = pParse->db;
   Trigger *pNew = pParse->pNewTrigger;
   TriggerStep *pStep;
@@ -1191,17 +1191,30 @@ static int renameResolveTrigger(Parse *pParse, const char *zDb){
       if( pParse->nErr ) rc = pParse->rc;
     }
     if( rc==SQLITE_OK && pStep->zTarget ){
-      Table *pTarget = sqlite3LocateTable(pParse, 0, pStep->zTarget, zDb);
-      if( pTarget==0 ){
-        rc = SQLITE_ERROR;
-      }else if( SQLITE_OK==(rc = sqlite3ViewGetColumnNames(pParse, pTarget)) ){
-        SrcList sSrc;
-        memset(&sSrc, 0, sizeof(sSrc));
-        sSrc.nSrc = 1;
-        sSrc.a[0].zName = pStep->zTarget;
-        sSrc.a[0].pTab = pTarget;
-        sNC.pSrcList = &sSrc;
-        if( pStep->pWhere ){
+      SrcList *pSrc = sqlite3TriggerStepSrc(pParse, pStep);
+      if( pSrc ){
+        int i;
+        for(i=0; i<pSrc->nSrc && rc==SQLITE_OK; i++){
+          struct SrcList_item *p = &pSrc->a[i];
+          p->iCursor = pParse->nTab++;
+          if( p->pSelect ){
+            sqlite3SelectPrep(pParse, p->pSelect, 0);
+            sqlite3ExpandSubquery(pParse, p);
+            assert( i>0 );
+            assert( pStep->pFrom->a[i-1].pSelect );
+            sqlite3SelectPrep(pParse, pStep->pFrom->a[i-1].pSelect, 0);
+          }else{
+            p->pTab = sqlite3LocateTableItem(pParse, 0, p);
+            if( p->pTab==0 ){
+              rc = SQLITE_ERROR;
+            }else{
+              p->pTab->nTabRef++;
+              rc = sqlite3ViewGetColumnNames(pParse, p->pTab);
+            }
+          }
+        }
+        sNC.pSrcList = pSrc;
+        if( rc==SQLITE_OK && pStep->pWhere ){
           rc = sqlite3ResolveExprNames(&sNC, pStep->pWhere);
         }
         if( rc==SQLITE_OK ){
@@ -1211,7 +1224,7 @@ static int renameResolveTrigger(Parse *pParse, const char *zDb){
         if( pStep->pUpsert ){
           Upsert *pUpsert = pStep->pUpsert;
           assert( rc==SQLITE_OK );
-          pUpsert->pUpsertSrc = &sSrc;
+          pUpsert->pUpsertSrc = pSrc;
           sNC.uNC.pUpsert = pUpsert;
           sNC.ncFlags = NC_UUpsert;
           rc = sqlite3ResolveExprListNames(&sNC, pUpsert->pUpsertTarget);
@@ -1228,6 +1241,9 @@ static int renameResolveTrigger(Parse *pParse, const char *zDb){
           sNC.ncFlags = 0;
         }
         sNC.pSrcList = 0;
+        sqlite3SrcListDelete(db, pSrc);
+      }else{
+        rc = SQLITE_NOMEM;
       }
     }
   }
@@ -1255,6 +1271,12 @@ static void renameWalkTrigger(Walker *pWalker, Trigger *pTrigger){
       sqlite3WalkExprList(pWalker, pUpsert->pUpsertSet);
       sqlite3WalkExpr(pWalker, pUpsert->pUpsertWhere);
       sqlite3WalkExpr(pWalker, pUpsert->pUpsertTargetWhere);
+    }
+    if( pStep->pFrom ){
+      int i;
+      for(i=0; i<pStep->pFrom->nSrc; i++){
+        sqlite3WalkSelect(pWalker, pStep->pFrom->a[i].pSelect);
+      }
     }
   }
 }
@@ -1414,7 +1436,7 @@ static void renameColumnFunc(
   }else{
     /* A trigger */
     TriggerStep *pStep;
-    rc = renameResolveTrigger(&sParse, (bTemp ? 0 : zDb));
+    rc = renameResolveTrigger(&sParse);
     if( rc!=SQLITE_OK ) goto renameColumnFunc_done;
 
     for(pStep=sParse.pNewTrigger->step_list; pStep; pStep=pStep->pNext){
@@ -1617,7 +1639,7 @@ static void renameTableFunc(
         }
 
         if( isLegacy==0 ){
-          rc = renameResolveTrigger(&sParse, bTemp ? 0 : zDb);
+          rc = renameResolveTrigger(&sParse);
           if( rc==SQLITE_OK ){
             renameWalkTrigger(&sWalker, pTrigger);
             for(pStep=pTrigger->step_list; pStep; pStep=pStep->pNext){
@@ -1704,7 +1726,7 @@ static void renameTableTest(
 
       else if( sParse.pNewTrigger ){
         if( isLegacy==0 ){
-          rc = renameResolveTrigger(&sParse, bTemp ? 0 : zDb);
+          rc = renameResolveTrigger(&sParse);
         }
         if( rc==SQLITE_OK ){
           int i1 = sqlite3SchemaToIndex(db, sParse.pNewTrigger->pTabSchema);

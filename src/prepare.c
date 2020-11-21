@@ -115,7 +115,13 @@ int sqlite3InitCallback(void *pInit, int argc, char **argv, char **NotUsed){
 
     assert( db->init.busy );
     db->init.iDb = iDb;
-    db->init.newTnum = sqlite3Atoi(argv[3]);
+    if( sqlite3GetUInt32(argv[3], &db->init.newTnum)==0
+     || (db->init.newTnum>pData->mxPage && pData->mxPage>0)
+    ){
+      if( sqlite3Config.bExtraSchemaChecks ){
+        corruptSchema(pData, argv[1], "invalid rootpage");
+      }
+    }
     db->init.orphanTrigger = 0;
     db->init.azInit = argv;
     pStmt = 0;
@@ -148,12 +154,17 @@ int sqlite3InitCallback(void *pInit, int argc, char **argv, char **NotUsed){
     */
     Index *pIndex;
     pIndex = sqlite3FindIndex(db, argv[1], db->aDb[iDb].zDbSName);
-    if( pIndex==0
-     || sqlite3GetInt32(argv[3],&pIndex->tnum)==0
+    if( pIndex==0 ){
+      corruptSchema(pData, argv[1], "orphan index");
+    }else
+    if( sqlite3GetUInt32(argv[3],&pIndex->tnum)==0
      || pIndex->tnum<2
+     || pIndex->tnum>pData->mxPage
      || sqlite3IndexHasDuplicateRootPage(pIndex)
     ){
-      corruptSchema(pData, argv[1], pIndex?"invalid rootpage":"orphan index");
+      if( sqlite3Config.bExtraSchemaChecks ){
+        corruptSchema(pData, argv[1], "invalid rootpage");
+      }
     }
   }
   return 0;
@@ -207,6 +218,7 @@ int sqlite3InitOne(sqlite3 *db, int iDb, char **pzErrMsg, u32 mFlags){
   initData.pzErrMsg = pzErrMsg;
   initData.mInitFlags = mFlags;
   initData.nInitRow = 0;
+  initData.mxPage = 0;
   sqlite3InitCallback(&initData, 5, (char **)azArg, 0);
   db->mDbFlags &= mask;
   if( initData.rc ){
@@ -228,7 +240,7 @@ int sqlite3InitOne(sqlite3 *db, int iDb, char **pzErrMsg, u32 mFlags){
   ** on the b-tree database, open one now. If a transaction is opened, it 
   ** will be closed before this function returns.  */
   sqlite3BtreeEnter(pDb->pBt);
-  if( !sqlite3BtreeIsInReadTrans(pDb->pBt) ){
+  if( sqlite3BtreeTxnState(pDb->pBt)==SQLITE_TXN_NONE ){
     rc = sqlite3BtreeBeginTrans(pDb->pBt, 0, 0);
     if( rc!=SQLITE_OK ){
       sqlite3SetString(pzErrMsg, db, sqlite3ErrStr(rc));
@@ -329,6 +341,7 @@ int sqlite3InitOne(sqlite3 *db, int iDb, char **pzErrMsg, u32 mFlags){
   /* Read the schema information out of the schema tables
   */
   assert( db->init.busy );
+  initData.mxPage = sqlite3BtreeLastPage(pDb->pBt);
   {
     char *zSql;
     zSql = sqlite3MPrintf(db, 
@@ -470,7 +483,7 @@ static void schemaIsValid(Parse *pParse){
     /* If there is not already a read-only (or read-write) transaction opened
     ** on the b-tree database, open one now. If a transaction is opened, it 
     ** will be closed immediately after reading the meta-value. */
-    if( !sqlite3BtreeIsInReadTrans(pBt) ){
+    if( sqlite3BtreeTxnState(pBt)==SQLITE_TXN_NONE ){
       rc = sqlite3BtreeBeginTrans(pBt, 0, 0);
       if( rc==SQLITE_NOMEM || rc==SQLITE_IOERR_NOMEM ){
         sqlite3OomFault(db);
@@ -733,6 +746,7 @@ static int sqlite3LockAndPrepare(
   sqlite3BtreeLeaveAll(db);
   rc = sqlite3ApiExit(db, rc);
   assert( (rc&db->errMask)==rc );
+  db->busyHandler.nBusy = 0;
   sqlite3_mutex_leave(db->mutex);
   return rc;
 }

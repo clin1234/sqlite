@@ -787,11 +787,6 @@ static const unsigned char aJournalMagic[] = {
 #endif
 
 /*
-** The maximum legal page number is (2^31 - 1).
-*/
-#define PAGER_MAX_PGNO 2147483647
-
-/*
 ** The argument to this macro is a file descriptor (type sqlite3_file*).
 ** Return 0 if it is not open, or non-zero (but not 1) if it is.
 **
@@ -2497,12 +2492,13 @@ static int pager_delsuper(Pager *pPager, const char *zSuper){
   ** If successful, open the super-journal file for reading.
   */
   pSuper = (sqlite3_file *)sqlite3MallocZero(pVfs->szOsFile * 2);
-  pJournal = (sqlite3_file *)(((u8 *)pSuper) + pVfs->szOsFile);
   if( !pSuper ){
     rc = SQLITE_NOMEM_BKPT;
+    pJournal = 0;
   }else{
     const int flags = (SQLITE_OPEN_READONLY|SQLITE_OPEN_SUPER_JOURNAL);
     rc = sqlite3OsOpen(pVfs, zSuper, pSuper, flags, 0);
+    pJournal = (sqlite3_file *)(((u8 *)pSuper) + pVfs->szOsFile);
   }
   if( rc!=SQLITE_OK ) goto delsuper_out;
 
@@ -3763,7 +3759,7 @@ void *sqlite3PagerTempSpace(Pager *pPager){
 **
 ** Regardless of mxPage, return the current maximum page count.
 */
-int sqlite3PagerMaxPageCount(Pager *pPager, int mxPage){
+Pgno sqlite3PagerMaxPageCount(Pager *pPager, Pgno mxPage){
   if( mxPage>0 ){
     pPager->mxPgno = mxPage;
   }
@@ -5490,7 +5486,7 @@ static int getPageNormal(
   if( pPg->pPager && !noContent ){
     /* In this case the pcache already contains an initialized copy of
     ** the page. Return without further ado.  */
-    assert( pgno<=PAGER_MAX_PGNO && pgno!=PAGER_MJ_PGNO(pPager) );
+    assert( pgno!=PAGER_MJ_PGNO(pPager) );
     pPager->aStat[PAGER_STAT_HIT]++;
     return SQLITE_OK;
 
@@ -5498,10 +5494,10 @@ static int getPageNormal(
     /* The pager cache has created a new page. Its content needs to 
     ** be initialized. But first some error checks:
     **
-    ** (1) The maximum page number is 2^31
+    ** (*) obsolete.  Was: maximum page number is 2^31
     ** (2) Never try to fetch the locking page
     */
-    if( pgno>PAGER_MAX_PGNO || pgno==PAGER_MJ_PGNO(pPager) ){
+    if( pgno==PAGER_MJ_PGNO(pPager) ){
       rc = SQLITE_CORRUPT_BKPT;
       goto pager_acquire_err;
     }

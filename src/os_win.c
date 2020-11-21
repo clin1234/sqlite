@@ -5126,7 +5126,11 @@ static int winOpen(
     dwCreationDisposition = OPEN_EXISTING;
   }
 
-  dwShareMode = FILE_SHARE_READ | FILE_SHARE_WRITE;
+  if( 0==sqlite3_uri_boolean(zName, "exclusive", 0) ){
+    dwShareMode = FILE_SHARE_READ | FILE_SHARE_WRITE;
+  }else{
+    dwShareMode = 0;
+  }
 
   if( isDelete ){
 #if SQLITE_OS_WINCE
@@ -5266,7 +5270,7 @@ static int winOpen(
   }
 
   sqlite3_free(zTmpname);
-  pFile->pMethod = pAppData ? pAppData->pMethod : &winIoMethod;
+  id->pMethods = pAppData ? pAppData->pMethod : &winIoMethod;
   pFile->pVfs = pVfs;
   pFile->h = h;
   if( isReadonly ){

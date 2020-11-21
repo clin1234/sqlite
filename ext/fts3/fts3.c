@@ -2068,7 +2068,7 @@ static void fts3PutDeltaVarint(
   sqlite3_int64 *piPrev,          /* IN/OUT: Previous value written to list */
   sqlite3_int64 iVal              /* Write this value to the list */
 ){
-  assert( iVal-*piPrev > 0 || (*piPrev==0 && iVal==0) );
+  assert_fts3_nc( iVal-*piPrev > 0 || (*piPrev==0 && iVal==0) );
   *pp += sqlite3Fts3PutVarint(*pp, iVal-*piPrev);
   *piPrev = iVal;
 }
@@ -3479,7 +3479,7 @@ static int fts3ColumnMethod(
         break;
       }else{
         iCol = p->nColumn;
-        /* fall-through */
+        /* no break */ deliberate_fall_through
       }
 
     default:
@@ -3722,9 +3722,13 @@ static void fts3SnippetFunc(
 
   switch( nVal ){
     case 6: nToken = sqlite3_value_int(apVal[5]);
+            /* no break */ deliberate_fall_through
     case 5: iCol = sqlite3_value_int(apVal[4]);
+            /* no break */ deliberate_fall_through
     case 4: zEllipsis = (const char*)sqlite3_value_text(apVal[3]);
+            /* no break */ deliberate_fall_through
     case 3: zEnd = (const char*)sqlite3_value_text(apVal[2]);
+            /* no break */ deliberate_fall_through
     case 2: zStart = (const char*)sqlite3_value_text(apVal[1]);
   }
   if( !zEllipsis || !zEnd || !zStart ){
@@ -5831,7 +5835,8 @@ static int fts3EvalGatherStats(
       fts3EvalRestart(pCsr, pRoot, &rc);
       do {
         fts3EvalNextRow(pCsr, pRoot, &rc);
-        assert( pRoot->bEof==0 );
+        assert_fts3_nc( pRoot->bEof==0 );
+        if( pRoot->bEof ) rc = FTS_CORRUPT_VTAB;
       }while( pRoot->iDocid!=iDocid && rc==SQLITE_OK );
     }
   }

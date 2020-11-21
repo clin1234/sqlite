@@ -44,20 +44,20 @@ char sqlite3TableColumnAffinity(Table *pTab, int iCol){
 */
 char sqlite3ExprAffinity(const Expr *pExpr){
   int op;
-  while( ExprHasProperty(pExpr, EP_Skip) ){
-    assert( pExpr->op==TK_COLLATE || pExpr->op==TK_IF_NULL_ROW );
+  while( ExprHasProperty(pExpr, EP_Skip|EP_IfNullRow) ){
+    assert( pExpr->op==TK_COLLATE
+         || pExpr->op==TK_IF_NULL_ROW
+         || (pExpr->op==TK_REGISTER && pExpr->op2==TK_IF_NULL_ROW) );
     pExpr = pExpr->pLeft;
     assert( pExpr!=0 );
   }
   op = pExpr->op;
   if( op==TK_SELECT ){
     assert( pExpr->flags&EP_xIsSelect );
-    if( ALWAYS(pExpr->x.pSelect)
-     && pExpr->x.pSelect->pEList
-     && ALWAYS(pExpr->x.pSelect->pEList->a[0].pExpr)
-    ){
-      return sqlite3ExprAffinity(pExpr->x.pSelect->pEList->a[0].pExpr);
-    }
+    assert( pExpr->x.pSelect!=0 );
+    assert( pExpr->x.pSelect->pEList!=0 );
+    assert( pExpr->x.pSelect->pEList->a[0].pExpr!=0 );
+    return sqlite3ExprAffinity(pExpr->x.pSelect->pEList->a[0].pExpr);
   }
   if( op==TK_REGISTER ) op = pExpr->op2;
 #ifndef SQLITE_OMIT_CAST
@@ -117,7 +117,7 @@ Expr *sqlite3ExprAddCollateString(Parse *pParse, Expr *pExpr, const char *zC){
 */
 Expr *sqlite3ExprSkipCollate(Expr *pExpr){
   while( pExpr && ExprHasProperty(pExpr, EP_Skip) ){
-    assert( pExpr->op==TK_COLLATE || pExpr->op==TK_IF_NULL_ROW );
+    assert( pExpr->op==TK_COLLATE );
     pExpr = pExpr->pLeft;
   }   
   return pExpr;
@@ -136,7 +136,7 @@ Expr *sqlite3ExprSkipCollateAndLikely(Expr *pExpr){
       assert( pExpr->op==TK_FUNCTION );
       pExpr = pExpr->x.pList->a[0].pExpr;
     }else{
-      assert( pExpr->op==TK_COLLATE || pExpr->op==TK_IF_NULL_ROW );
+      assert( pExpr->op==TK_COLLATE );
       pExpr = pExpr->pLeft;
     }
   }   
@@ -200,7 +200,7 @@ CollSeq *sqlite3ExprCollSeq(Parse *pParse, const Expr *pExpr){
          && ALWAYS(!ExprHasProperty(p, EP_xIsSelect))
         ){
           int i;
-          for(i=0; i<p->x.pList->nExpr; i++){
+          for(i=0; ALWAYS(i<p->x.pList->nExpr); i++){
             if( ExprHasProperty(p->x.pList->a[i].pExpr, EP_Collate) ){
               pNext = p->x.pList->a[i].pExpr;
               break;
@@ -770,6 +770,7 @@ int sqlite3SelectExprHeight(Select *p){
 ** Expr.flags. 
 */
 void sqlite3ExprSetHeightAndFlags(Parse *pParse, Expr *p){
+  if( pParse->nErr ) return;
   if( p && p->x.pList && !ExprHasProperty(p, EP_xIsSelect) ){
     p->flags |= EP_Propagate & sqlite3ExprListFlags(p->x.pList);
   }
@@ -2031,7 +2032,7 @@ static int exprNodeIsConstant(Walker *pWalker, Expr *pExpr){
       if( sqlite3ExprIdToTrueFalse(pExpr) ){
         return WRC_Prune;
       }
-      /* Fall thru */
+      /* no break */ deliberate_fall_through
     case TK_COLUMN:
     case TK_AGG_FUNCTION:
     case TK_AGG_COLUMN:
@@ -2045,7 +2046,7 @@ static int exprNodeIsConstant(Walker *pWalker, Expr *pExpr){
       if( pWalker->eCode==3 && pExpr->iTable==pWalker->u.iCur ){
         return WRC_Continue;
       }
-      /* Fall through */
+      /* no break */ deliberate_fall_through
     case TK_IF_NULL_ROW:
     case TK_REGISTER:
     case TK_DOT:
@@ -2066,7 +2067,7 @@ static int exprNodeIsConstant(Walker *pWalker, Expr *pExpr){
         pWalker->eCode = 0;
         return WRC_Abort;
       }
-      /* Fall through */
+      /* no break */ deliberate_fall_through
     default:
       testcase( pExpr->op==TK_SELECT ); /* sqlite3SelectWalkFail() disallows */
       testcase( pExpr->op==TK_EXISTS ); /* sqlite3SelectWalkFail() disallows */
@@ -3622,6 +3623,7 @@ void sqlite3ExprCodeMove(Parse *pParse, int iFrom, int iTo, int nReg){
 */
 static void exprToRegister(Expr *pExpr, int iReg){
   Expr *p = sqlite3ExprSkipCollateAndLikely(pExpr);
+  if( NEVER(p==0) ) return;
   p->op2 = p->op;
   p->op = TK_REGISTER;
   p->iTable = iReg;
@@ -3838,6 +3840,7 @@ expr_code_doover:
         return target;
       }
       /* Otherwise, fall thru into the TK_COLUMN case */
+      /* no break */ deliberate_fall_through
     }
     case TK_COLUMN: {
       int iTab = pExpr->iTable;
@@ -4608,6 +4611,7 @@ int sqlite3ExprCodeTemp(Parse *pParse, Expr *pExpr, int *pReg){
   int r2;
   pExpr = sqlite3ExprSkipCollateAndLikely(pExpr);
   if( ConstFactorOk(pParse)
+   && ALWAYS(pExpr!=0)
    && pExpr->op!=TK_REGISTER
    && sqlite3ExprIsConstantNotJoin(pExpr)
   ){
@@ -4903,7 +4907,7 @@ void sqlite3ExprIfTrue(Parse *pParse, Expr *pExpr, int dest, int jumpIfNull){
       testcase( op==TK_ISNOT );
       op = (op==TK_IS) ? TK_EQ : TK_NE;
       jumpIfNull = SQLITE_NULLEQ;
-      /* Fall thru */
+      /* no break */ deliberate_fall_through
     case TK_LT:
     case TK_LE:
     case TK_GT:
@@ -5079,7 +5083,7 @@ void sqlite3ExprIfFalse(Parse *pParse, Expr *pExpr, int dest, int jumpIfNull){
       testcase( pExpr->op==TK_ISNOT );
       op = (pExpr->op==TK_IS) ? TK_NE : TK_EQ;
       jumpIfNull = SQLITE_NULLEQ;
-      /* Fall thru */
+      /* no break */ deliberate_fall_through
     case TK_LT:
     case TK_LE:
     case TK_GT:
@@ -5391,13 +5395,13 @@ static int exprImpliesNotNull(
     case TK_RSHIFT: 
     case TK_CONCAT: 
       seenNot = 1;
-      /* Fall thru */
+      /* no break */ deliberate_fall_through
     case TK_STAR:
     case TK_REM:
     case TK_BITAND:
     case TK_SLASH: {
       if( exprImpliesNotNull(pParse, p->pRight, pNN, iTab, seenNot) ) return 1;
-      /* Fall thru into the next case */
+      /* no break */ deliberate_fall_through
     }
     case TK_SPAN:
     case TK_COLLATE:
@@ -5546,6 +5550,7 @@ static int impliesNotNullRow(Walker *pWalker, Expr *pExpr){
       ){
         return WRC_Prune;
       }
+      /* no break */ deliberate_fall_through
     }
     default:
       return WRC_Continue;

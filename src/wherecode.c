@@ -129,7 +129,7 @@ int sqlite3WhereExplainOneScan(
   if( sqlite3ParseToplevel(pParse)->explain==2 )
 #endif
   {
-    struct SrcList_item *pItem = &pTabList->a[pLevel->iFrom];
+    SrcItem *pItem = &pTabList->a[pLevel->iFrom];
     Vdbe *v = pParse->pVdbe;      /* VM being constructed */
     sqlite3 *db = pParse->db;     /* Database handle */
     int isSearch;                 /* True for a SEARCH. False for SCAN. */
@@ -148,16 +148,8 @@ int sqlite3WhereExplainOneScan(
             || (wctrlFlags&(WHERE_ORDERBY_MIN|WHERE_ORDERBY_MAX));
 
     sqlite3StrAccumInit(&str, db, zBuf, sizeof(zBuf), SQLITE_MAX_LENGTH);
-    sqlite3_str_appendall(&str, isSearch ? "SEARCH" : "SCAN");
-    if( pItem->pSelect ){
-      sqlite3_str_appendf(&str, " SUBQUERY %u", pItem->pSelect->selId);
-    }else{
-      sqlite3_str_appendf(&str, " TABLE %s", pItem->zName);
-    }
-
-    if( pItem->zAlias ){
-      sqlite3_str_appendf(&str, " AS %s", pItem->zAlias);
-    }
+    str.printfFlags = SQLITE_PRINTF_INTERNAL;
+    sqlite3_str_appendf(&str, "%s %S", isSearch ? "SEARCH" : "SCAN", pItem);
     if( (flags & (WHERE_IPK|WHERE_VIRTUALTABLE))==0 ){
       const char *zFmt = 0;
       Index *pIdx;
@@ -305,6 +297,12 @@ static void disableTerm(WhereLevel *pLevel, WhereTerm *pTerm){
     }else{
       pTerm->wtFlags |= TERM_CODED;
     }
+#ifdef WHERETRACE_ENABLED
+    if( sqlite3WhereTrace & 0x20000 ){
+      sqlite3DebugPrintf("DISABLE-");
+      sqlite3WhereTermPrint(pTerm, (int)(pTerm - (pTerm->pWC->a)));
+    }
+#endif
     if( pTerm->iParent<0 ) break;
     pTerm = &pTerm->pWC->a[pTerm->iParent];
     assert( pTerm!=0 );
@@ -622,7 +620,22 @@ static int codeEqualityTerm(
     sqlite3DbFree(pParse->db, aiMap);
 #endif
   }
-  disableTerm(pLevel, pTerm);
+
+  /* As an optimization, try to disable the WHERE clause term that is
+  ** driving the index as it will always be true.  The correct answer is
+  ** obtained regardless, but we might get the answer with fewer CPU cycles
+  ** by omitting the term.
+  **
+  ** But do not disable the term unless we are certain that the term is
+  ** not a transitive constraint.  For an example of where that does not
+  ** work, see https://sqlite.org/forum/forumpost/eb8613976a (2021-05-04)
+  */
+  if( (pLevel->pWLoop->wsFlags & WHERE_TRANSCONS)==0
+   || (pTerm->eOperator & WO_EQUIV)==0
+  ){
+    disableTerm(pLevel, pTerm);
+  }
+
   return iReg;
 }
 
@@ -708,6 +721,7 @@ static int codeAllEqualityTerms(
 
   if( nSkip ){
     int iIdxCur = pLevel->iIdxCur;
+    sqlite3VdbeAddOp3(v, OP_Null, 0, regBase, regBase+nSkip-1);
     sqlite3VdbeAddOp1(v, (bRev?OP_Last:OP_Rewind), iIdxCur);
     VdbeCoverageIf(v, bRev==0);
     VdbeCoverageIf(v, bRev!=0);
@@ -759,7 +773,7 @@ static int codeAllEqualityTerms(
         sqlite3VdbeAddOp2(v, OP_IsNull, regBase+j, pLevel->addrBrk);
         VdbeCoverage(v);
       }
-      if( zAff ){
+      if( pParse->db->mallocFailed==0 ){
         if( sqlite3CompareAffinity(pRight, zAff[j])==SQLITE_AFF_BLOB ){
           zAff[j] = SQLITE_AFF_BLOB;
         }
@@ -922,7 +936,7 @@ static int codeCursorHintFixExpr(Walker *pWalker, Expr *pExpr){
 ** Insert an OP_CursorHint instruction if it is appropriate to do so.
 */
 static void codeCursorHint(
-  struct SrcList_item *pTabItem,  /* FROM clause item */
+  SrcItem *pTabItem,  /* FROM clause item */
   WhereInfo *pWInfo,    /* The where clause */
   WhereLevel *pLevel,   /* Which loop to provide hints for */
   WhereTerm *pEndRange  /* Hint this end-of-scan boundary term if not NULL */
@@ -1297,7 +1311,7 @@ Bitmask sqlite3WhereCodeOneLoopStart(
   WhereClause *pWC;    /* Decomposition of the entire WHERE clause */
   WhereTerm *pTerm;               /* A WHERE clause term */
   sqlite3 *db;                    /* Database connection */
-  struct SrcList_item *pTabItem;  /* FROM clause term being coded */
+  SrcItem *pTabItem;              /* FROM clause term being coded */
   int addrBrk;                    /* Jump here to break out of the loop */
   int addrHalt;                   /* addrBrk for the outermost loop */
   int addrCont;                   /* Jump here to continue with next cycle */
@@ -1743,6 +1757,12 @@ Bitmask sqlite3WhereCodeOneLoopStart(
       SWAP(u8, nBtm, nTop);
     }
 
+    if( iLevel>0 && (pLoop->wsFlags & WHERE_IN_SEEKSCAN)!=0 ){
+      /* In case OP_SeekScan is used, ensure that the index cursor does not
+      ** point to a valid row for the first iteration of this loop. */
+      sqlite3VdbeAddOp1(v, OP_NullRow, iIdxCur);
+    }
+
     /* Generate code to evaluate all constraint terms using == or IN
     ** and store the values of those terms in an array of registers
     ** starting at regBase.
@@ -2079,7 +2099,7 @@ Bitmask sqlite3WhereCodeOneLoopStart(
     */
     if( pWInfo->nLevel>1 ){
       int nNotReady;                 /* The number of notReady tables */
-      struct SrcList_item *origSrc;     /* Original list of tables */
+      SrcItem *origSrc;              /* Original list of tables */
       nNotReady = pWInfo->nLevel - iLevel - 1;
       pOrTab = sqlite3StackAllocRaw(db,
                             sizeof(*pOrTab)+ nNotReady*sizeof(pOrTab->a[0]));
@@ -2450,6 +2470,7 @@ Bitmask sqlite3WhereCodeOneLoopStart(
     sEAlt = *pAlt->pExpr;
     sEAlt.pLeft = pE->pLeft;
     sqlite3ExprIfFalse(pParse, &sEAlt, addrCont, SQLITE_JUMPIFNULL);
+    pAlt->wtFlags |= TERM_CODED;
   }
 
   /* For a LEFT OUTER JOIN, generate code that will record the fact that

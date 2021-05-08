@@ -270,11 +270,7 @@ struct WhereTerm {
 #define TERM_ORINFO     0x0010 /* Need to free the WhereTerm.u.pOrInfo object */
 #define TERM_ANDINFO    0x0020 /* Need to free the WhereTerm.u.pAndInfo obj */
 #define TERM_OR_OK      0x0040 /* Used during OR-clause processing */
-#ifdef SQLITE_ENABLE_STAT4
-#  define TERM_VNULL    0x0080 /* Manufactured x>NULL or x<=NULL term */
-#else
-#  define TERM_VNULL    0x0000 /* Disabled if not using stat4 */
-#endif
+#define TERM_VNULL      0x0080 /* Manufactured x>NULL or x<=NULL term */
 #define TERM_LIKEOPT    0x0100 /* Virtual terms from the LIKE optimization */
 #define TERM_LIKECOND   0x0200 /* Conditionally this LIKE operator term */
 #define TERM_LIKE       0x0400 /* The original LIKE operator */
@@ -297,8 +293,8 @@ struct WhereScan {
   const char *zCollName;     /* Required collating sequence, if not NULL */
   Expr *pIdxExpr;            /* Search for this index expression */
   char idxaff;               /* Must match this affinity, if zCollName!=NULL */
-  unsigned char nEquiv;      /* Number of entries in aEquiv[] */
-  unsigned char iEquiv;      /* Next unused slot in aEquiv[] */
+  unsigned char nEquiv;      /* Number of entries in aiCur[] and aiColumn[] */
+  unsigned char iEquiv;      /* Next unused slot in aiCur[] and aiColumn[] */
   u32 opMask;                /* Acceptable operators */
   int k;                     /* Resume scanning at this->pWC->a[this->k] */
   int aiCur[11];             /* Cursors in the equivalence class */
@@ -544,7 +540,7 @@ Bitmask sqlite3WhereExprUsage(WhereMaskSet*, Expr*);
 Bitmask sqlite3WhereExprUsageNN(WhereMaskSet*, Expr*);
 Bitmask sqlite3WhereExprListUsage(WhereMaskSet*, ExprList*);
 void sqlite3WhereExprAnalyze(SrcList*, WhereClause*);
-void sqlite3WhereTabFuncArgs(Parse*, struct SrcList_item*, WhereClause*);
+void sqlite3WhereTabFuncArgs(Parse*, SrcItem*, WhereClause*);
 
 
 
@@ -607,5 +603,6 @@ void sqlite3WhereTabFuncArgs(Parse*, struct SrcList_item*, WhereClause*);
 #define WHERE_IN_EARLYOUT  0x00040000  /* Perhaps quit IN loops early */
 #define WHERE_BIGNULL_SORT 0x00080000  /* Column nEq of index is BIGNULL */
 #define WHERE_IN_SEEKSCAN  0x00100000  /* Seek-scan optimization for IN */
+#define WHERE_TRANSCONS    0x00200000  /* Uses a transitive constraint */
 
 #endif /* !defined(SQLITE_WHEREINT_H) */

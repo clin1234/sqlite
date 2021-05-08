@@ -431,7 +431,7 @@ struct Fts5SegIter {
   int iLeafPgno;                  /* Current leaf page number */
   Fts5Data *pLeaf;                /* Current leaf data */
   Fts5Data *pNextLeaf;            /* Leaf page (iLeafPgno+1) */
-  int iLeafOffset;                /* Byte offset within current leaf */
+  i64 iLeafOffset;                /* Byte offset within current leaf */
 
   /* Next method */
   void (*xNext)(Fts5Index*, Fts5SegIter*, int*);
@@ -1611,7 +1611,7 @@ static void fts5SegIterLoadNPos(Fts5Index *p, Fts5SegIter *pIter){
 
 static void fts5SegIterLoadRowid(Fts5Index *p, Fts5SegIter *pIter){
   u8 *a = pIter->pLeaf->p;        /* Buffer to read data from */
-  int iOff = pIter->iLeafOffset;
+  i64 iOff = pIter->iLeafOffset;
 
   ASSERT_SZLEAF_OK(pIter->pLeaf);
   if( iOff>=pIter->pLeaf->szLeaf ){
@@ -1644,7 +1644,7 @@ static void fts5SegIterLoadRowid(Fts5Index *p, Fts5SegIter *pIter){
 */
 static void fts5SegIterLoadTerm(Fts5Index *p, Fts5SegIter *pIter, int nKeep){
   u8 *a = pIter->pLeaf->p;        /* Buffer to read data from */
-  int iOff = pIter->iLeafOffset;  /* Offset to read at */
+  i64 iOff = pIter->iLeafOffset;  /* Offset to read at */
   int nNew;                       /* Bytes of new data */
 
   iOff += fts5GetVarint32(&a[iOff], nNew);
@@ -2072,7 +2072,6 @@ static void fts5SegIterNext(
       ** this block is particularly performance critical, so equivalent
       ** code is inlined.  */
       int nSz;
-      assert( p->rc==SQLITE_OK );
       assert_nc( pIter->iLeafOffset<=pIter->pLeaf->nn );
       fts5FastGetVarint32(pIter->pLeaf->p, pIter->iLeafOffset, nSz);
       pIter->bDel = (nSz & 0x0001);
@@ -4541,14 +4540,14 @@ static void fts5FlushOneHash(Fts5Index *p){
         fts5BufferSafeAppendBlob(pBuf, pDoclist, nDoclist);
       }else{
         i64 iRowid = 0;
-        i64 iDelta = 0;
+        u64 iDelta = 0;
         int iOff = 0;
 
         /* The entire doclist will not fit on this leaf. The following 
         ** loop iterates through the poslists that make up the current 
         ** doclist.  */
         while( p->rc==SQLITE_OK && iOff<nDoclist ){
-          iOff += fts5GetVarint(&pDoclist[iOff], (u64*)&iDelta);
+          iOff += fts5GetVarint(&pDoclist[iOff], &iDelta);
           iRowid += iDelta;
           
           if( writer.bFirstRowidInPage ){
@@ -4822,6 +4821,9 @@ static void fts5DoclistIterNext(Fts5DoclistIter *pIter){
     }
 
     pIter->aPoslist = p;
+    if( &pIter->aPoslist[pIter->nPoslist]>pIter->aEof ){
+      pIter->aPoslist = 0;
+    }
   }
 }
 
@@ -4830,9 +4832,11 @@ static void fts5DoclistIterInit(
   Fts5DoclistIter *pIter
 ){
   memset(pIter, 0, sizeof(*pIter));
-  pIter->aPoslist = pBuf->p;
-  pIter->aEof = &pBuf->p[pBuf->n];
-  fts5DoclistIterNext(pIter);
+  if( pBuf->n>0 ){
+    pIter->aPoslist = pBuf->p;
+    pIter->aEof = &pBuf->p[pBuf->n];
+    fts5DoclistIterNext(pIter);
+  }
 }
 
 #if 0
@@ -5074,7 +5078,8 @@ static void fts5MergePrefixLists(
       nTail = pHead->iter.nPoslist - pHead->iOff;
 
       /* WRITEPOSLISTSIZE */
-      assert( tmp.n+nTail<=nTmp );
+      assert_nc( tmp.n+nTail<=nTmp );
+      assert( tmp.n+nTail<=nTmp+nMerge*10 );
       if( tmp.n+nTail>nTmp-FTS5_DATA_ZERO_PADDING ){
         if( p->rc==SQLITE_OK ) p->rc = FTS5_CORRUPT;
         break;
@@ -5594,8 +5599,9 @@ int sqlite3Fts5IterNextFrom(Fts5IndexIter *pIndexIter, i64 iMatch){
 const char *sqlite3Fts5IterTerm(Fts5IndexIter *pIndexIter, int *pn){
   int n;
   const char *z = (const char*)fts5MultiIterTerm((Fts5Iter*)pIndexIter, &n);
+  assert_nc( z || n<=1 );
   *pn = n-1;
-  return &z[1];
+  return (z ? &z[1] : 0);
 }
 
 /*
@@ -6220,6 +6226,7 @@ int sqlite3Fts5IndexIntegrityCheck(Fts5Index *p, u64 cksum, int bUseCksum){
 ** function only.
 */
 
+#ifdef SQLITE_TEST
 /*
 ** Decode a segment-data rowid from the %_data table. This function is
 ** the opposite of macro FTS5_SEGMENT_ROWID().
@@ -6242,7 +6249,9 @@ static void fts5DecodeRowid(
 
   *piSegid = (int)(iRowid & (((i64)1 << FTS5_DATA_ID_B) - 1));
 }
+#endif /* SQLITE_TEST */
 
+#ifdef SQLITE_TEST
 static void fts5DebugRowid(int *pRc, Fts5Buffer *pBuf, i64 iKey){
   int iSegid, iHeight, iPgno, bDlidx;       /* Rowid compenents */
   fts5DecodeRowid(iKey, &iSegid, &bDlidx, &iHeight, &iPgno);
@@ -6260,7 +6269,9 @@ static void fts5DebugRowid(int *pRc, Fts5Buffer *pBuf, i64 iKey){
     );
   }
 }
+#endif /* SQLITE_TEST */
 
+#ifdef SQLITE_TEST
 static void fts5DebugStructure(
   int *pRc,                       /* IN/OUT: error code */
   Fts5Buffer *pBuf,
@@ -6282,7 +6293,9 @@ static void fts5DebugStructure(
     sqlite3Fts5BufferAppendPrintf(pRc, pBuf, "}");
   }
 }
+#endif /* SQLITE_TEST */
 
+#ifdef SQLITE_TEST
 /*
 ** This is part of the fts5_decode() debugging aid.
 **
@@ -6307,7 +6320,9 @@ static void fts5DecodeStructure(
   fts5DebugStructure(pRc, pBuf, p);
   fts5StructureRelease(p);
 }
+#endif /* SQLITE_TEST */
 
+#ifdef SQLITE_TEST
 /*
 ** This is part of the fts5_decode() debugging aid.
 **
@@ -6330,7 +6345,9 @@ static void fts5DecodeAverages(
     zSpace = " ";
   }
 }
+#endif /* SQLITE_TEST */
 
+#ifdef SQLITE_TEST
 /*
 ** Buffer (a/n) is assumed to contain a list of serialized varints. Read
 ** each varint and append its string representation to buffer pBuf. Return
@@ -6347,7 +6364,9 @@ static int fts5DecodePoslist(int *pRc, Fts5Buffer *pBuf, const u8 *a, int n){
   }
   return iOff;
 }
+#endif /* SQLITE_TEST */
 
+#ifdef SQLITE_TEST
 /*
 ** The start of buffer (a/n) contains the start of a doclist. The doclist
 ** may or may not finish within the buffer. This function appends a text
@@ -6380,7 +6399,9 @@ static int fts5DecodeDoclist(int *pRc, Fts5Buffer *pBuf, const u8 *a, int n){
 
   return iOff;
 }
+#endif /* SQLITE_TEST */
 
+#ifdef SQLITE_TEST
 /*
 ** This function is part of the fts5_decode() debugging function. It is 
 ** only ever used with detail=none tables.
@@ -6421,7 +6442,9 @@ static void fts5DecodeRowidList(
     sqlite3Fts5BufferAppendPrintf(pRc, pBuf, " %lld%s", iRowid, zApp);
   }
 }
+#endif /* SQLITE_TEST */
 
+#ifdef SQLITE_TEST
 /*
 ** The implementation of user-defined scalar function fts5_decode().
 */
@@ -6630,7 +6653,9 @@ static void fts5DecodeFunction(
   }
   fts5BufferFree(&s);
 }
+#endif /* SQLITE_TEST */
 
+#ifdef SQLITE_TEST 
 /*
 ** The implementation of user-defined scalar function fts5_rowid().
 */
@@ -6664,6 +6689,7 @@ static void fts5RowidFunction(
     }
   }
 }
+#endif /* SQLITE_TEST */
 
 /*
 ** This is called as part of registering the FTS5 module with database
@@ -6674,6 +6700,7 @@ static void fts5RowidFunction(
 ** SQLite error code is returned instead.
 */
 int sqlite3Fts5IndexInit(sqlite3 *db){
+#ifdef SQLITE_TEST
   int rc = sqlite3_create_function(
       db, "fts5_decode", 2, SQLITE_UTF8, 0, fts5DecodeFunction, 0, 0
   );
@@ -6691,6 +6718,10 @@ int sqlite3Fts5IndexInit(sqlite3 *db){
     );
   }
   return rc;
+#else
+  return SQLITE_OK;
+  UNUSED_PARAM(db);
+#endif
 }
 
 

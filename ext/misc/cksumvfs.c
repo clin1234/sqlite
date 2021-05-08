@@ -579,6 +579,18 @@ static int cksmFileControl(sqlite3_file *pFile, int op, void *pArg){
   }else if( op==SQLITE_FCNTL_CKPT_START || op==SQLITE_FCNTL_CKPT_DONE ){
     p->inCkpt = op==SQLITE_FCNTL_CKPT_START;
     if( p->pPartner ) p->pPartner->inCkpt = p->inCkpt;
+  }else if( op==SQLITE_FCNTL_CKSM_FILE ){
+    /* This VFS needs to obtain a pointer to the corresponding database
+    ** file handle from within xOpen() calls to open wal files. To do this,
+    ** it uses the sqlite3_database_file_object() API to obtain a pointer
+    ** to the file-handle used by SQLite to access the db file. This is
+    ** fine if cksmvfs happens to be the top-level VFS, but not if there
+    ** are one or more wrapper VFS. To handle this case, this file-control
+    ** is used to extract the cksmvfs file-handle from any wrapper file 
+    ** handle.  */
+    sqlite3_file **ppFile = (sqlite3_file**)pArg;
+    *ppFile = (sqlite3_file*)p;
+    return SQLITE_OK;
   }
   rc = pFile->pMethods->xFileControl(pFile, op, pArg);
   if( rc==SQLITE_OK && op==SQLITE_FCNTL_VFSNAME ){
@@ -688,6 +700,8 @@ static int cksmOpen(
   if( rc ) goto cksm_open_done;
   if( flags & SQLITE_OPEN_WAL ){
     sqlite3_file *pDb = sqlite3_database_file_object(zName);
+    rc = pDb->pMethods->xFileControl(pDb, SQLITE_FCNTL_CKSM_FILE, (void*)&pDb);
+    assert( rc==SQLITE_OK );
     p->pPartner = (CksmFile*)pDb;
     assert( p->pPartner->pPartner==0 );
     p->pPartner->pPartner = p;
@@ -750,7 +764,17 @@ static int cksmGetLastError(sqlite3_vfs *pVfs, int a, char *b){
   return ORIGVFS(pVfs)->xGetLastError(ORIGVFS(pVfs), a, b);
 }
 static int cksmCurrentTimeInt64(sqlite3_vfs *pVfs, sqlite3_int64 *p){
-  return ORIGVFS(pVfs)->xCurrentTimeInt64(ORIGVFS(pVfs), p);
+  sqlite3_vfs *pOrig = ORIGVFS(pVfs);
+  int rc;
+  assert( pOrig->iVersion>=2 );
+  if( pOrig->xCurrentTimeInt64 ){
+    rc = pOrig->xCurrentTimeInt64(pOrig, p);
+  }else{
+    double r;
+    rc = pOrig->xCurrentTime(pOrig, &r);
+    *p = (sqlite3_int64)(r*86400000.0);
+  }
+  return rc;
 }
 static int cksmSetSystemCall(
   sqlite3_vfs *pVfs,

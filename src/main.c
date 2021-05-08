@@ -305,7 +305,7 @@ int sqlite3_initialize(void){
       sqlite3GlobalConfig.isPCacheInit = 1;
       rc = sqlite3OsInit();
     }
-#ifdef SQLITE_ENABLE_DESERIALIZE
+#ifndef SQLITE_OMIT_DESERIALIZE
     if( rc==SQLITE_OK ){
       rc = sqlite3MemdbInit();
     }
@@ -720,12 +720,12 @@ int sqlite3_config(int op, ...){
     }
 #endif /* SQLITE_ENABLE_SORTER_REFERENCES */
 
-#ifdef SQLITE_ENABLE_DESERIALIZE
+#ifndef SQLITE_OMIT_DESERIALIZE
     case SQLITE_CONFIG_MEMDB_MAXSIZE: {
       sqlite3GlobalConfig.mxMemdbSize = va_arg(ap, sqlite3_int64);
       break;
     }
-#endif /* SQLITE_ENABLE_DESERIALIZE */
+#endif /* SQLITE_OMIT_DESERIALIZE */
 
     default: {
       rc = SQLITE_ERROR;
@@ -1274,7 +1274,7 @@ int sqlite3_txn_state(sqlite3 *db, const char *zSchema){
 /*
 ** Two variations on the public interface for closing a database
 ** connection. The sqlite3_close() version returns SQLITE_BUSY and
-** leaves the connection option if there are unfinalized prepared
+** leaves the connection open if there are unfinalized prepared
 ** statements or unfinished sqlite3_backups.  The sqlite3_close_v2()
 ** version forces the connection to become a zombie if there are
 ** unclosed resources, and arranges for deallocation when the last
@@ -2374,7 +2374,7 @@ int sqlite3_wal_checkpoint_v2(
   return SQLITE_OK;
 #else
   int rc;                         /* Return code */
-  int iDb = SQLITE_MAX_ATTACHED;  /* sqlite3.aDb[] index of db to checkpoint */
+  int iDb;                        /* Schema to checkpoint */
 
 #ifdef SQLITE_ENABLE_API_ARMOR
   if( !sqlite3SafetyCheckOk(db) ) return SQLITE_MISUSE_BKPT;
@@ -2397,6 +2397,8 @@ int sqlite3_wal_checkpoint_v2(
   sqlite3_mutex_enter(db->mutex);
   if( zDb && zDb[0] ){
     iDb = sqlite3FindDbName(db, zDb);
+  }else{
+    iDb = SQLITE_MAX_DB;   /* This means process all schemas */
   }
   if( iDb<0 ){
     rc = SQLITE_ERROR;
@@ -2445,7 +2447,7 @@ int sqlite3_wal_checkpoint(sqlite3 *db, const char *zDb){
 ** associated with the specific b-tree being checkpointed is taken by
 ** this function while the checkpoint is running.
 **
-** If iDb is passed SQLITE_MAX_ATTACHED, then all attached databases are
+** If iDb is passed SQLITE_MAX_DB then all attached databases are
 ** checkpointed. If an error is encountered it is returned immediately -
 ** no attempt is made to checkpoint any remaining databases.
 **
@@ -2460,9 +2462,11 @@ int sqlite3Checkpoint(sqlite3 *db, int iDb, int eMode, int *pnLog, int *pnCkpt){
   assert( sqlite3_mutex_held(db->mutex) );
   assert( !pnLog || *pnLog==-1 );
   assert( !pnCkpt || *pnCkpt==-1 );
+  testcase( iDb==SQLITE_MAX_ATTACHED ); /* See forum post a006d86f72 */
+  testcase( iDb==SQLITE_MAX_DB );
 
   for(i=0; i<db->nDb && rc==SQLITE_OK; i++){
-    if( i==iDb || iDb==SQLITE_MAX_ATTACHED ){
+    if( i==iDb || iDb==SQLITE_MAX_DB ){
       rc = sqlite3BtreeCheckpoint(db->aDb[i].pBt, eMode, pnLog, pnCkpt);
       pnLog = 0;
       pnCkpt = 0;
@@ -4080,7 +4084,7 @@ int sqlite3_test_control(int op, ...){
     */
     case SQLITE_TESTCTRL_OPTIMIZATIONS: {
       sqlite3 *db = va_arg(ap, sqlite3*);
-      db->dbOptFlags = (u16)(va_arg(ap, int) & 0xffff);
+      db->dbOptFlags = va_arg(ap, u32);
       break;
     }
 

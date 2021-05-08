@@ -56,6 +56,7 @@
 #define CC_ID        27    /* unicode characters usable in IDs */
 #define CC_ILLEGAL   28    /* Illegal character */
 #define CC_NUL       29    /* 0x00 */
+#define CC_BOM       30    /* First byte of UTF8 BOM:  0xEF 0xBB 0xBF */
 
 static const unsigned char aiClass[] = {
 #ifdef SQLITE_ASCII
@@ -68,19 +69,19 @@ static const unsigned char aiClass[] = {
 /* 5x */    1,  1,  1,  1,  1,  1,  1,  1,  0,  2,  2,  9, 28, 28, 28,  2,
 /* 6x */    8,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
 /* 7x */    1,  1,  1,  1,  1,  1,  1,  1,  0,  2,  2, 28, 10, 28, 25, 28,
-/* 8x */    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
-/* 9x */    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
-/* Ax */    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
-/* Bx */    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
-/* Cx */    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
-/* Dx */    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
-/* Ex */    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
-/* Fx */    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2
+/* 8x */   27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27,
+/* 9x */   27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27,
+/* Ax */   27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27,
+/* Bx */   27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27,
+/* Cx */   27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27,
+/* Dx */   27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27,
+/* Ex */   27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 30,
+/* Fx */   27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27
 #endif
 #ifdef SQLITE_EBCDIC
 /*         x0  x1  x2  x3  x4  x5  x6  x7  x8  x9  xa  xb  xc  xd  xe  xf */
 /* 0x */   29, 28, 28, 28, 28,  7, 28, 28, 28, 28, 28, 28,  7,  7, 28, 28,
-/* 1x */   28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28,
+/* 1x */   28, 28, 28, 28, 28,  7, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28,
 /* 2x */   28, 28, 28, 28, 28,  7, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28,
 /* 3x */   28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28,
 /* 4x */    7, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 26, 12, 17, 20, 10,
@@ -535,6 +536,14 @@ int sqlite3GetToken(const unsigned char *z, int *tokenType){
       i = 1;
       break;
     }
+    case CC_BOM: {
+      if( z[1]==0xbb && z[2]==0xbf ){
+        *tokenType = TK_SPACE;
+        return 3;
+      }
+      i = 1;
+      break;
+    }
     case CC_NUL: {
       *tokenType = TK_ILLEGAL;
       return 0;
@@ -713,19 +722,7 @@ int sqlite3RunParser(Parse *pParse, const char *zSql, char **pzErrMsg){
   if( !IN_RENAME_OBJECT ){
     sqlite3DeleteTrigger(db, pParse->pNewTrigger);
   }
-
-  if( pParse->pWithToFree ) sqlite3WithDelete(db, pParse->pWithToFree);
   sqlite3DbFree(db, pParse->pVList);
-  while( pParse->pAinc ){
-    AutoincInfo *p = pParse->pAinc;
-    pParse->pAinc = p->pNext;
-    sqlite3DbFreeNN(db, p);
-  }
-  while( pParse->pZombieTab ){
-    Table *p = pParse->pZombieTab;
-    pParse->pZombieTab = p->pNextZombie;
-    sqlite3DeleteTable(db, p);
-  }
   db->pParse = pParse->pParentParse;
   pParse->pParentParse = 0;
   assert( nErr==0 || pParse->rc!=SQLITE_OK );

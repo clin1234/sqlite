@@ -747,6 +747,7 @@ SHELL_SRC = \
         $(TOP)/ext/misc/decimal.c \
 	$(TOP)/ext/misc/fileio.c \
         $(TOP)/ext/misc/ieee754.c \
+        $(TOP)/ext/misc/regexp.c \
 	$(TOP)/ext/misc/shathree.c \
 	$(TOP)/ext/misc/sqlar.c \
         $(TOP)/ext/misc/uint.c \
@@ -1079,6 +1080,9 @@ rbu$(EXE): $(TOP)/ext/rbu/rbu.c $(TOP)/ext/rbu/sqlite3rbu.c sqlite3.o
 loadfts: $(TOP)/tool/loadfts.c libsqlite3.a
 	$(TCC) $(TOP)/tool/loadfts.c libsqlite3.a -o loadfts $(THREADLIB)
 
+threadtest5:	$(TOP)/test/threadtest5.c libsqlite3.a
+	$(TCC) $(TOP)/test/threadtest5.c libsqlite3.a -o threadtest5 $(THREADLIB)
+
 # This target will fail if the SQLite amalgamation contains any exported
 # symbols that do not begin with "sqlite3_". It is run as part of the
 # releasetest.tcl script.
@@ -1141,3 +1145,4 @@ clean:
 	rm -f sqldiff sqldiff.exe
 	rm -f fts5.* fts5parse.*
 	rm -f lsm.h lsm1.c
+	rm -f threadtest5

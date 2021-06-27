@@ -3786,6 +3786,8 @@ case OP_ReopenIdx: {
   pCur = p->apCsr[pOp->p1];
   if( pCur && pCur->pgnoRoot==(u32)pOp->p2 ){
     assert( pCur->iDb==pOp->p3 );      /* Guaranteed by the code generator */
+    assert( pCur->eCurType==CURTYPE_BTREE );
+    sqlite3BtreeClearCursor(pCur->uc.pCursor);
     goto open_cursor_set_hints;
   }
   /* If the cursor is not currently open or is open on a different
@@ -6250,7 +6252,7 @@ case OP_Destroy: {     /* out2 */
 ** See also: Destroy
 */
 case OP_Clear: {
-  int nChange;
+  i64 nChange;
  
   sqlite3VdbeIncrWriteCounter(p, 0);
   nChange = 0;

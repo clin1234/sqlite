@@ -303,7 +303,7 @@ static int lookupName(
         u8 hCol;
         pTab = pItem->pTab;
         assert( pTab!=0 && pTab->zName!=0 );
-        assert( pTab->nCol>0 );
+        assert( pTab->nCol>0 || pParse->nErr );
         if( pItem->pSelect && (pItem->pSelect->selFlags & SF_NestedFrom)!=0 ){
           int hit = 0;
           pEList = pItem->pSelect->pEList;
@@ -331,9 +331,6 @@ static int lookupName(
             sqlite3RenameTokenRemap(pParse, 0, (void*)&pExpr->y.pTab);
           }
         }
-        if( 0==(cntTab++) ){
-          pMatch = pItem;
-        }
         hCol = sqlite3StrIHash(zCol);
         for(j=0, pCol=pTab->aCol; j<pTab->nCol; j++, pCol++){
           if( pCol->hName==hCol && sqlite3StrICmp(pCol->zName, zCol)==0 ){
@@ -351,6 +348,10 @@ static int lookupName(
             pExpr->iColumn = j==pTab->iPKey ? -1 : (i16)j;
             break;
           }
+        }
+        if( 0==cnt && VisibleRowid(pTab) ){
+          cntTab++;
+          pMatch = pItem;
         }
       }
       if( pMatch ){
@@ -474,7 +475,7 @@ static int lookupName(
      && pMatch
      && (pNC->ncFlags & (NC_IdxExpr|NC_GenCol))==0
      && sqlite3IsRowid(zCol)
-     && VisibleRowid(pMatch->pTab)
+     && ALWAYS(VisibleRowid(pMatch->pTab))
     ){
       cnt = 1;
       pExpr->iColumn = -1;
@@ -1086,9 +1087,12 @@ static int resolveExprStep(Walker *pWalker, Expr *pExpr){
           assert( pDef!=0 || IN_RENAME_OBJECT );
           if( pNC2 && pDef ){
             assert( SQLITE_FUNC_MINMAX==NC_MinMaxAgg );
+            assert( SQLITE_FUNC_ANYORDER==NC_OrderAgg );
             testcase( (pDef->funcFlags & SQLITE_FUNC_MINMAX)!=0 );
-            pNC2->ncFlags |= NC_HasAgg | (pDef->funcFlags & SQLITE_FUNC_MINMAX);
-
+            testcase( (pDef->funcFlags & SQLITE_FUNC_ANYORDER)!=0 );
+            pNC2->ncFlags |= NC_HasAgg 
+              | ((pDef->funcFlags^SQLITE_FUNC_ANYORDER)
+                  & (SQLITE_FUNC_MINMAX|SQLITE_FUNC_ANYORDER));
           }
         }
         pNC->ncFlags |= savedAllowFlags;
@@ -1631,7 +1635,7 @@ static int resolveSelectStep(Walker *pWalker, Select *p){
       p->pOrderBy = 0;
     }
   
-    /* Recursively resolve names in all subqueries
+    /* Recursively resolve names in all subqueries in the FROM clause
     */
     for(i=0; i<p->pSrc->nSrc; i++){
       SrcItem *pItem = &p->pSrc->a[i];
@@ -1675,7 +1679,8 @@ static int resolveSelectStep(Walker *pWalker, Select *p){
     pGroupBy = p->pGroupBy;
     if( pGroupBy || (sNC.ncFlags & NC_HasAgg)!=0 ){
       assert( NC_MinMaxAgg==SF_MinMaxAgg );
-      p->selFlags |= SF_Aggregate | (sNC.ncFlags&NC_MinMaxAgg);
+      assert( NC_OrderAgg==SF_OrderByReqd );
+      p->selFlags |= SF_Aggregate | (sNC.ncFlags&(NC_MinMaxAgg|NC_OrderAgg));
     }else{
       sNC.ncFlags &= ~NC_AllowAgg;
     }
@@ -1858,8 +1863,8 @@ int sqlite3ResolveExprNames(
   Walker w;
 
   if( pExpr==0 ) return SQLITE_OK;
-  savedHasAgg = pNC->ncFlags & (NC_HasAgg|NC_MinMaxAgg|NC_HasWin);
-  pNC->ncFlags &= ~(NC_HasAgg|NC_MinMaxAgg|NC_HasWin);
+  savedHasAgg = pNC->ncFlags & (NC_HasAgg|NC_MinMaxAgg|NC_HasWin|NC_OrderAgg);
+  pNC->ncFlags &= ~(NC_HasAgg|NC_MinMaxAgg|NC_HasWin|NC_OrderAgg);
   w.pParse = pNC->pParse;
   w.xExprCallback = resolveExprStep;
   w.xSelectCallback = (pNC->ncFlags & NC_NoSelect) ? 0 : resolveSelectStep;
@@ -1902,8 +1907,8 @@ int sqlite3ResolveExprListNames(
   w.xSelectCallback = resolveSelectStep;
   w.xSelectCallback2 = 0;
   w.u.pNC = pNC;
-  savedHasAgg = pNC->ncFlags & (NC_HasAgg|NC_MinMaxAgg|NC_HasWin);
-  pNC->ncFlags &= ~(NC_HasAgg|NC_MinMaxAgg|NC_HasWin);
+  savedHasAgg = pNC->ncFlags & (NC_HasAgg|NC_MinMaxAgg|NC_HasWin|NC_OrderAgg);
+  pNC->ncFlags &= ~(NC_HasAgg|NC_MinMaxAgg|NC_HasWin|NC_OrderAgg);
   for(i=0; i<pList->nExpr; i++){
     Expr *pExpr = pList->a[i].pExpr;
     if( pExpr==0 ) continue;
@@ -1921,10 +1926,11 @@ int sqlite3ResolveExprListNames(
     assert( EP_Win==NC_HasWin );
     testcase( pNC->ncFlags & NC_HasAgg );
     testcase( pNC->ncFlags & NC_HasWin );
-    if( pNC->ncFlags & (NC_HasAgg|NC_MinMaxAgg|NC_HasWin) ){
+    if( pNC->ncFlags & (NC_HasAgg|NC_MinMaxAgg|NC_HasWin|NC_OrderAgg) ){
       ExprSetProperty(pExpr, pNC->ncFlags & (NC_HasAgg|NC_HasWin) );
-      savedHasAgg |= pNC->ncFlags & (NC_HasAgg|NC_MinMaxAgg|NC_HasWin);
-      pNC->ncFlags &= ~(NC_HasAgg|NC_MinMaxAgg|NC_HasWin);
+      savedHasAgg |= pNC->ncFlags &
+                          (NC_HasAgg|NC_MinMaxAgg|NC_HasWin|NC_OrderAgg);
+      pNC->ncFlags &= ~(NC_HasAgg|NC_MinMaxAgg|NC_HasWin|NC_OrderAgg);
     }
     if( w.pParse->nErr>0 ) return WRC_Abort;
   }
